@@ -5,26 +5,42 @@ import (
     "fmt"
     "log"
     "os"
-	"strconv"
+    "strconv"
+
     "github.com/gofiber/fiber/v2"
+    "github.com/joho/godotenv"
     _ "github.com/lib/pq"
 )
 
 func main() {
-    // connection
-    connStr := "postgresql://postgres:supauser@127.0.0.1/kubazar?sslmode=disable"
+    // Load environment variables from .env file
+    err := godotenv.Load()
+    if err != nil {
+        log.Fatalf("Error loading .env file: %v", err)
+    }
 
+    // Get environment variables
+    dbHost := os.Getenv("DB_HOST")
+    dbPort := os.Getenv("DB_PORT")
+    dbUser := os.Getenv("DB_USER")
+    dbPassword := os.Getenv("DB_PASSWORD")
+    dbName := os.Getenv("DB_NAME")
+
+    // Create connection string
+    connStr := fmt.Sprintf("postgresql://%s:%s@%s:%s/%s?sslmode=require", dbUser, dbPassword, dbHost, dbPort, dbName)
+
+    // Connect to the database
     db, err := sql.Open("postgres", connStr)
     if err != nil {
         log.Fatal(err)
     }
-
 
     err = db.Ping()
     if err != nil {
         log.Fatal("Unable to connect to the database:", err)
     }
 
+	
     app := fiber.New()
 
     // routes
@@ -54,8 +70,9 @@ func main() {
 }
 
 // Handler functions
+
 func indexHandler(c *fiber.Ctx, db *sql.DB) error {
-	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price FROM kubazar")
+	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price FROM products")
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -93,9 +110,10 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	if err := c.BodyParser(item); err != nil {
 		return c.Status(400).SendString(err.Error())
 	}
+// advantages && disadvantages for decoupled systems
 
 	sqlStatement := `
-		INSERT INTO kubazar (Item_name, Item_desc, Item_price)
+		INSERT INTO products (Item_name, Item_desc, Item_price)
 		VALUES ($1, $2, $3)
 		RETURNING Item_id`
 	var itemID int
@@ -126,7 +144,7 @@ func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	}
 
 	sqlStatement := `
-		UPDATE kubazar
+		UPDATE products
 		SET Item_name = $2, Item_desc = $3, Item_price = $4
 		WHERE Item_id = $1`
 	res, err := db.Exec(sqlStatement, item.ItemID, item.ItemName, item.ItemDesc, item.ItemPrice)
@@ -157,7 +175,7 @@ func deleteHandler(c *fiber.Ctx, db *sql.DB) error {
 		return c.Status(400).SendString("Invalid item ID")
 	}
 
-	sqlStatement := `DELETE FROM kubazar WHERE Item_id = $1`
+	sqlStatement := `DELETE FROM products WHERE Item_id = $1`
 	res, err := db.Exec(sqlStatement, itemID)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
