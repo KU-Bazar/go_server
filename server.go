@@ -20,6 +20,15 @@ import (
 	_ "github.com/lib/pq"
 )
 
+type Product struct {
+	ItemID     int     `json:"Item_id"`
+	ItemName   string  `json:"Item_name"`
+	ItemDesc   string  `json:"Item_desc"`
+	ItemPrice  float64 `json:"Item_price"`
+	ItemSeller string  `json:"Item_seller"`
+	ImageURL   string  `json:"image_url"`
+}
+
 func main() {
 	// Load environment variables from .env file
 	err := godotenv.Load()
@@ -120,31 +129,23 @@ func uploadToS3(filename string, fileContent io.Reader) (string, error) {
 }
 
 func indexHandler(c *fiber.Ctx, db *sql.DB) error {
-	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, COALESCE(Image_url, '') as Image_url FROM products")
+	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(Image_url, '') as Image_url FROM products")
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
 	defer rows.Close()
 
-	var items []map[string]interface{}
+	var items []Product
 	for rows.Next() {
-		var itemID int
-		var itemName, itemDesc, imageURL string
-		var itemPrice float64
-		if err := rows.Scan(&itemID, &itemName, &itemDesc, &itemPrice, &imageURL); err != nil {
+		var item Product
+		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &item.ImageURL); err != nil {
 			return c.Status(500).SendString(err.Error())
-		}
-		item := map[string]interface{}{
-			"Item_id":    itemID,
-			"Item_name":  itemName,
-			"Item_desc":  itemDesc,
-			"Item_price": itemPrice,
-			"image_url":  imageURL,
 		}
 		items = append(items, item)
 	}
 	return c.JSON(items)
 }
+
 
 func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Parse the file from the request
@@ -168,6 +169,7 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Parse other form fields
 	itemName := c.FormValue("item_name")
 	itemDesc := c.FormValue("item_desc")
+	itemSeller := c.FormValue(("item_seller"))
 	itemPrice, err := strconv.ParseFloat(c.FormValue("item_price"), 64)
 	if err != nil {
 		return c.Status(400).SendString("Invalid item price")
@@ -175,21 +177,22 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 
 	// Insert record into the database
 	sqlStatement := `
-        INSERT INTO products (Item_name, Item_desc, Item_price, image_url)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO products (Item_name, Item_desc, Item_price, seller ,image_url)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING Item_id`
 	var itemID int
-	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, s3URL).Scan(&itemID)
+	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, s3URL).Scan(&itemID)
 	if err != nil {
 		return c.Status(500).SendString("Database insert error: " + err.Error())
 	}
 
 	return c.JSON(fiber.Map{
-		"Item_id":    itemID,
-		"Item_name":  itemName,
-		"Item_desc":  itemDesc,
-		"Item_price": itemPrice,
-		"image_url":  s3URL,
+		"Item_id":     itemID,
+		"Item_name":   itemName,
+		"Item_desc":   itemDesc,
+		"Item_price":  itemPrice,
+		"Item_seller": itemSeller,
+		"image_url":   s3URL,
 	})
 }
 func uploadHandler(c *fiber.Ctx, db *sql.DB) error {
@@ -214,37 +217,39 @@ func uploadHandler(c *fiber.Ctx, db *sql.DB) error {
 	itemName := c.FormValue("item_name")
 	itemDesc := c.FormValue("item_desc")
 	itemPriceStr := c.FormValue("item_price")
-
+	itemSeller := c.FormValue("item_seller")
 	itemPrice, err := strconv.ParseFloat(itemPriceStr, 64)
 	if err != nil {
 		return c.Status(400).SendString("Invalid item price")
 	}
 
 	sqlStatement := `
-	INSERT INTO products (Item_name, Item_desc, Item_price, Image_url)
-	VALUES ($1, $2, $3, $4)
-	RETURNING Item_id`
+        INSERT INTO products (Item_name, Item_desc, Item_price, seller ,image_url)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING Item_id`
 	var itemID int
-	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, imageUrl).Scan(&itemID)
+	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, imageUrl).Scan(&itemID)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
 
 	return c.JSON(fiber.Map{
-        "Item_id":    itemID,
-        "Item_name":  itemName,
-        "Item_desc":  itemDesc,
-        "Item_price": itemPrice,
-        "Image_url":  imageUrl,
-    })
+		"Item_id":     itemID,
+		"Item_name":   itemName,
+		"Item_desc":   itemDesc,
+		"Item_price":  itemPrice,
+		"Item_seller": itemSeller,
+		"Image_url":   imageUrl,
+	})
 }
 
 func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	type Item struct {
-		ItemID    int     `json:"item_id"`
-		ItemName  string  `json:"item_name"`
-		ItemDesc  string  `json:"item_desc"`
-		ItemPrice float64 `json:"item_price"`
+		ItemID     int     `json:"item_id"`
+		ItemName   string  `json:"item_name"`
+		ItemDesc   string  `json:"item_desc"`
+		ItemPrice  float64 `json:"item_price"`
+		ItemSeller string  `json:"item_seller"`
 	}
 
 	item := new(Item)
@@ -254,9 +259,9 @@ func putHandler(c *fiber.Ctx, db *sql.DB) error {
 
 	sqlStatement := `
 		UPDATE products
-		SET Item_name = $2, Item_desc = $3, Item_price = $4
+		SET Item_name = $2, Item_desc = $3, Item_price = $4, Item_seller = $4
 		WHERE Item_id = $1`
-	res, err := db.Exec(sqlStatement, item.ItemID, item.ItemName, item.ItemDesc, item.ItemPrice)
+	res, err := db.Exec(sqlStatement, item.ItemID, item.ItemName, item.ItemDesc, item.ItemPrice, item.ItemSeller)
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -271,10 +276,11 @@ func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"Item_id":    item.ItemID,
-		"Item_name":  item.ItemName,
-		"Item_desc":  item.ItemDesc,
-		"Item_price": item.ItemPrice,
+		"Item_id":     item.ItemID,
+		"Item_name":   item.ItemName,
+		"Item_desc":   item.ItemDesc,
+		"Item_price":  item.ItemPrice,
+		"Item_seller": item.ItemSeller,
 	})
 }
 
