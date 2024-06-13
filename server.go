@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -183,23 +184,26 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 		}
 		imageUrls = append(imageUrls, s3URL)
 	}
+
+	// Marshal imageUrls into JSON
 	imageUrlsJSON, err := json.Marshal(imageUrls)
 	if err != nil {
 		return c.Status(500).SendString("Failed to marshal image URLs: " + err.Error())
 	}
+
 	// Parse other form fields
 	itemName := c.FormValue("item_name")
 	itemDesc := c.FormValue("item_desc")
-	itemSeller := c.FormValue(("item_seller"))
+	itemSeller := c.FormValue("item_seller")
 	itemPrice, err := strconv.ParseFloat(c.FormValue("item_price"), 64)
 	if err != nil {
 		return c.Status(400).SendString("Invalid item price")
 	}
 
-	categories := c.FormValue("categories")
-	var categoriesArray []string
-	if err := json.Unmarshal([]byte(categories), &categoriesArray); err != nil {
-		return c.Status(400).SendString("Invalid categories format")
+	categoriesJSON := c.FormValue("categories")
+	var categories []string
+	if err := json.Unmarshal([]byte(categoriesJSON), &categories); err != nil {
+		return c.Status(400).SendString("Invalid categories format: " + err.Error())
 	}
 
 	// Insert record into the database
@@ -208,20 +212,23 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING Item_id`
 	var itemID int
-	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, string(imageUrlsJSON), pq.Array(categoriesArray)).Scan(&itemID)
+	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, string(imageUrlsJSON), pq.Array(categories)).Scan(&itemID)
 	if err != nil {
 		return c.Status(500).SendString("Database insert error: " + err.Error())
 	}
 
-	return c.JSON(fiber.Map{
+	// Prepare response JSON
+	response := map[string]interface{}{
 		"Item_id":     itemID,
 		"Item_name":   itemName,
 		"Item_desc":   itemDesc,
 		"Item_price":  itemPrice,
 		"Item_seller": itemSeller,
+		"categories":  categories, // Ensure categories is returned in the response
 		"image_url":   imageUrls,
-		"categories":  categoriesArray,
-	})
+	}
+
+	return c.JSON(response)
 }
 
 func putHandler(c *fiber.Ctx, db *sql.DB) error {
@@ -299,21 +306,38 @@ func getProductHandler(c *fiber.Ctx, db *sql.DB) error {
 	var product Product
 	var imageUrlsJSON, categoriesJSON string
 	sqlStatement := `
-		SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]')
-		FROM products
-		WHERE Item_id = $1`
+        SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '{}')
+        FROM products
+        WHERE Item_id = $1`
 	err := db.QueryRow(sqlStatement, productID).Scan(&product.ItemID, &product.ItemName, &product.ItemDesc, &product.ItemPrice, &product.ItemSeller, &imageUrlsJSON, &categoriesJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.Status(404).SendString("Product not found")
 		}
-		return c.Status(500).SendString(err.Error())
+		return c.Status(500).SendString("Database query error: " + err.Error())
 	}
+
 	if err := json.Unmarshal([]byte(imageUrlsJSON), &product.ImageURL); err != nil {
 		return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
 	}
-	if err := json.Unmarshal([]byte(categoriesJSON), &product.Categories); err != nil {
-		return c.Status(500).SendString("Failed to unmarshal categories: " + err.Error())
-	}
+
+	// Handle categories PostgreSQL array format
+	categoriesArray := parsePostgresArray(categoriesJSON)
+
+	product.Categories = categoriesArray
+
 	return c.JSON(product)
+}
+
+// Helper function to parse PostgreSQL array format into []string
+func parsePostgresArray(input string) []string {
+	// Remove leading and trailing curly braces
+	input = strings.Trim(input, "{}")
+	// Split by commas
+	categories := strings.Split(input, ",")
+	// Trim whitespace from each element
+	for i := range categories {
+		categories[i] = strings.TrimSpace(categories[i])
+	}
+	return categories
 }
