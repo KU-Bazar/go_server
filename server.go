@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/gofiber/fiber/v2"
 	"github.com/joho/godotenv"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type Product struct {
@@ -28,7 +28,7 @@ type Product struct {
 	ItemPrice  float64  `json:"Item_price"`
 	ItemSeller string   `json:"Item_seller"`
 	ImageURL   []string `json:"Image_url"`
-	
+	Categories []string `json:"categories"`
 }
 
 func main() {
@@ -65,7 +65,6 @@ func main() {
 	app.Get("/", func(c *fiber.Ctx) error {
 		return indexHandler(c, db)
 	})
-
 
 	app.Put("/update", func(c *fiber.Ctx) error {
 		return putHandler(c, db)
@@ -132,7 +131,7 @@ func uploadToS3(filename string, fileContent io.Reader) (string, error) {
 }
 
 func indexHandler(c *fiber.Ctx, db *sql.DB) error {
-	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]') FROM products")
+	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]') FROM products")
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -141,12 +140,15 @@ func indexHandler(c *fiber.Ctx, db *sql.DB) error {
 	var items []Product
 	for rows.Next() {
 		var item Product
-		var imageUrlsJSON string
-		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON); err != nil {
+		var imageUrlsJSON, categoriesJSON string
+		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoriesJSON); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 		if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
 			return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
+		}
+		if err := json.Unmarshal([]byte(categoriesJSON), &item.Categories); err != nil {
+			return c.Status(500).SendString("Failed to unmarshal categories: " + err.Error())
 		}
 
 		items = append(items, item)
@@ -182,9 +184,9 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 		imageUrls = append(imageUrls, s3URL)
 	}
 	imageUrlsJSON, err := json.Marshal(imageUrls)
-    if err != nil {
-        return c.Status(500).SendString("Failed to marshal image URLs: " + err.Error())
-    }
+	if err != nil {
+		return c.Status(500).SendString("Failed to marshal image URLs: " + err.Error())
+	}
 	// Parse other form fields
 	itemName := c.FormValue("item_name")
 	itemDesc := c.FormValue("item_desc")
@@ -193,13 +195,20 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	if err != nil {
 		return c.Status(400).SendString("Invalid item price")
 	}
+
+	categories := c.FormValue("categories")
+	var categoriesArray []string
+	if err := json.Unmarshal([]byte(categories), &categoriesArray); err != nil {
+		return c.Status(400).SendString("Invalid categories format")
+	}
+
 	// Insert record into the database
 	sqlStatement := `
-        INSERT INTO products (Item_name, Item_desc, Item_price, seller, image_url)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO products (Item_name, Item_desc, Item_price, seller, image_url, categories)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING Item_id`
 	var itemID int
-	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, string(imageUrlsJSON)).Scan(&itemID)
+	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, string(imageUrlsJSON), pq.Array(categoriesArray)).Scan(&itemID)
 	if err != nil {
 		return c.Status(500).SendString("Database insert error: " + err.Error())
 	}
@@ -211,17 +220,18 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 		"Item_price":  itemPrice,
 		"Item_seller": itemSeller,
 		"image_url":   imageUrls,
+		"categories":  categoriesArray,
 	})
 }
 
-
 func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	type Item struct {
-		ItemID     int     `json:"item_id"`
-		ItemName   string  `json:"item_name"`
-		ItemDesc   string  `json:"item_desc"`
-		ItemPrice  float64 `json:"item_price"`
-		ItemSeller string  `json:"item_seller"`
+		ItemID     int      `json:"item_id"`
+		ItemName   string   `json:"item_name"`
+		ItemDesc   string   `json:"item_desc"`
+		ItemPrice  float64  `json:"item_price"`
+		ItemSeller string   `json:"item_seller"`
+		Categories []string `json:"categories"`
 	}
 
 	item := new(Item)
@@ -231,9 +241,9 @@ func putHandler(c *fiber.Ctx, db *sql.DB) error {
 
 	sqlStatement := `
 		UPDATE products
-		SET Item_name = $2, Item_desc = $3, Item_price = $4, Item_seller = $4
+		SET Item_name = $2, Item_desc = $3, Item_price = $4, Item_seller = $5, categories = $6
 		WHERE Item_id = $1`
-	res, err := db.Exec(sqlStatement, item.ItemID, item.ItemName, item.ItemDesc, item.ItemPrice, item.ItemSeller)
+	res, err := db.Exec(sqlStatement, item.ItemID, item.ItemName, item.ItemDesc, item.ItemPrice, item.ItemSeller, pq.Array(item.Categories))
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -253,6 +263,7 @@ func putHandler(c *fiber.Ctx, db *sql.DB) error {
 		"Item_desc":   item.ItemDesc,
 		"Item_price":  item.ItemPrice,
 		"Item_seller": item.ItemSeller,
+		"Categories":  item.Categories,
 	})
 }
 
@@ -286,12 +297,12 @@ func getProductHandler(c *fiber.Ctx, db *sql.DB) error {
 	}
 
 	var product Product
-	var imageUrlsJSON string
+	var imageUrlsJSON, categoriesJSON string
 	sqlStatement := `
-		SELECT Item_id, Item_name, Item_desc, Item_price, seller,  COALESCE(image_url::text, '[]')
+		SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]')
 		FROM products
 		WHERE Item_id = $1`
-	err := db.QueryRow(sqlStatement, productID).Scan(&product.ItemID, &product.ItemName, &product.ItemDesc, &product.ItemPrice, &product.ItemSeller, &imageUrlsJSON)
+	err := db.QueryRow(sqlStatement, productID).Scan(&product.ItemID, &product.ItemName, &product.ItemDesc, &product.ItemPrice, &product.ItemSeller, &imageUrlsJSON, &categoriesJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.Status(404).SendString("Product not found")
@@ -301,6 +312,8 @@ func getProductHandler(c *fiber.Ctx, db *sql.DB) error {
 	if err := json.Unmarshal([]byte(imageUrlsJSON), &product.ImageURL); err != nil {
 		return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
 	}
-
+	if err := json.Unmarshal([]byte(categoriesJSON), &product.Categories); err != nil {
+		return c.Status(500).SendString("Failed to unmarshal categories: " + err.Error())
+	}
 	return c.JSON(product)
 }
