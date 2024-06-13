@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -21,12 +22,13 @@ import (
 )
 
 type Product struct {
-	ItemID     int     `json:"Item_id"`
-	ItemName   string  `json:"Item_name"`
-	ItemDesc   string  `json:"Item_desc"`
-	ItemPrice  float64 `json:"Item_price"`
-	ItemSeller string  `json:"Item_seller"`
-	ImageURL   string  `json:"image_url"`
+	ItemID     int      `json:"Item_id"`
+	ItemName   string   `json:"Item_name"`
+	ItemDesc   string   `json:"Item_desc"`
+	ItemPrice  float64  `json:"Item_price"`
+	ItemSeller string   `json:"Item_seller"`
+	ImageURL   []string `json:"Image_url"`
+	
 }
 
 func main() {
@@ -64,9 +66,6 @@ func main() {
 		return indexHandler(c, db)
 	})
 
-	app.Post("/", func(c *fiber.Ctx) error {
-		return postHandler(c, db)
-	})
 
 	app.Put("/update", func(c *fiber.Ctx) error {
 		return putHandler(c, db)
@@ -76,7 +75,11 @@ func main() {
 		return deleteHandler(c, db)
 	})
 	app.Post("/upload", func(c *fiber.Ctx) error {
-		return uploadHandler(c, db)
+		return postHandler(c, db)
+	})
+
+	app.Get("/product/:id", func(c *fiber.Ctx) error {
+		return getProductHandler(c, db)
 	})
 
 	// Port connection
@@ -129,7 +132,7 @@ func uploadToS3(filename string, fileContent io.Reader) (string, error) {
 }
 
 func indexHandler(c *fiber.Ctx, db *sql.DB) error {
-	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(Image_url, '') as Image_url FROM products")
+	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]') FROM products")
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -138,34 +141,50 @@ func indexHandler(c *fiber.Ctx, db *sql.DB) error {
 	var items []Product
 	for rows.Next() {
 		var item Product
-		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &item.ImageURL); err != nil {
+		var imageUrlsJSON string
+		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
+		if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
+			return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
+		}
+
 		items = append(items, item)
 	}
 	return c.JSON(items)
 }
 
-
 func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Parse the file from the request
-	file, err := c.FormFile("file")
+	form, err := c.MultipartForm()
 	if err != nil {
 		return c.Status(400).SendString("File upload error: " + err.Error())
 	}
 
-	fileContent, err := file.Open()
-	if err != nil {
-		return c.Status(500).SendString("File open error: " + err.Error())
-	}
-	defer fileContent.Close()
-
-	// Upload file to S3
-	s3URL, err := uploadToS3(file.Filename, fileContent)
-	if err != nil {
-		return c.Status(500).SendString("S3 upload error: " + err.Error())
+	files := form.File["files"]
+	if len(files) == 0 {
+		return c.Status(400).SendString("No files uploaded")
 	}
 
+	var imageUrls []string
+
+	for _, file := range files {
+		fileContent, err := file.Open()
+		if err != nil {
+			return c.Status(500).SendString("Failed to open file: " + err.Error())
+		}
+		defer fileContent.Close()
+
+		s3URL, err := uploadToS3(file.Filename, fileContent)
+		if err != nil {
+			return c.Status(500).SendString("S3 upload error: " + err.Error())
+		}
+		imageUrls = append(imageUrls, s3URL)
+	}
+	imageUrlsJSON, err := json.Marshal(imageUrls)
+    if err != nil {
+        return c.Status(500).SendString("Failed to marshal image URLs: " + err.Error())
+    }
 	// Parse other form fields
 	itemName := c.FormValue("item_name")
 	itemDesc := c.FormValue("item_desc")
@@ -174,14 +193,13 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	if err != nil {
 		return c.Status(400).SendString("Invalid item price")
 	}
-
 	// Insert record into the database
 	sqlStatement := `
-        INSERT INTO products (Item_name, Item_desc, Item_price, seller ,image_url)
+        INSERT INTO products (Item_name, Item_desc, Item_price, seller, image_url)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING Item_id`
 	var itemID int
-	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, s3URL).Scan(&itemID)
+	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, string(imageUrlsJSON)).Scan(&itemID)
 	if err != nil {
 		return c.Status(500).SendString("Database insert error: " + err.Error())
 	}
@@ -192,56 +210,10 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 		"Item_desc":   itemDesc,
 		"Item_price":  itemPrice,
 		"Item_seller": itemSeller,
-		"image_url":   s3URL,
+		"image_url":   imageUrls,
 	})
 }
-func uploadHandler(c *fiber.Ctx, db *sql.DB) error {
-	file, err := c.FormFile("file")
-	if err != nil {
-		return c.Status(400).SendString("Failed to get the file")
-	}
 
-	// Open the file
-	fileContent, err := file.Open()
-	if err != nil {
-		return c.Status(500).SendString("Failed to open the file")
-	}
-	defer fileContent.Close()
-
-	// Upload to S3
-	imageUrl, err := uploadToS3(file.Filename, fileContent)
-	if err != nil {
-		return c.Status(500).SendString("Failed to upload the file to S3")
-	}
-
-	itemName := c.FormValue("item_name")
-	itemDesc := c.FormValue("item_desc")
-	itemPriceStr := c.FormValue("item_price")
-	itemSeller := c.FormValue("item_seller")
-	itemPrice, err := strconv.ParseFloat(itemPriceStr, 64)
-	if err != nil {
-		return c.Status(400).SendString("Invalid item price")
-	}
-
-	sqlStatement := `
-        INSERT INTO products (Item_name, Item_desc, Item_price, seller ,image_url)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING Item_id`
-	var itemID int
-	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, imageUrl).Scan(&itemID)
-	if err != nil {
-		return c.Status(500).SendString(err.Error())
-	}
-
-	return c.JSON(fiber.Map{
-		"Item_id":     itemID,
-		"Item_name":   itemName,
-		"Item_desc":   itemDesc,
-		"Item_price":  itemPrice,
-		"Item_seller": itemSeller,
-		"Image_url":   imageUrl,
-	})
-}
 
 func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	type Item struct {
@@ -306,4 +278,29 @@ func deleteHandler(c *fiber.Ctx, db *sql.DB) error {
 	}
 
 	return c.SendString("Item deleted")
+}
+func getProductHandler(c *fiber.Ctx, db *sql.DB) error {
+	productID := c.Params("id")
+	if productID == "" {
+		return c.Status(400).SendString("Product ID is required")
+	}
+
+	var product Product
+	var imageUrlsJSON string
+	sqlStatement := `
+		SELECT Item_id, Item_name, Item_desc, Item_price, seller,  COALESCE(image_url::text, '[]')
+		FROM products
+		WHERE Item_id = $1`
+	err := db.QueryRow(sqlStatement, productID).Scan(&product.ItemID, &product.ItemName, &product.ItemDesc, &product.ItemPrice, &product.ItemSeller, &imageUrlsJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return c.Status(404).SendString("Product not found")
+		}
+		return c.Status(500).SendString(err.Error())
+	}
+	if err := json.Unmarshal([]byte(imageUrlsJSON), &product.ImageURL); err != nil {
+		return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
+	}
+
+	return c.JSON(product)
 }
