@@ -29,7 +29,7 @@ type Product struct {
 	ItemPrice  float64  `json:"Item_price"`
 	ItemSeller string   `json:"Item_seller"`
 	ImageURL   []string `json:"Image_url"`
-	Categories []string `json:"categories"`
+	Category   string   `json:"category"`
 }
 
 func main() {
@@ -136,7 +136,7 @@ func uploadToS3(filename string, fileContent io.Reader) (string, error) {
 
 func indexHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Execute SQL query to fetch all products
-	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]') FROM products")
+	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(category::text, '{}') FROM products")
 	if err != nil {
 		return c.Status(500).SendString("Failed to execute query: " + err.Error())
 	}
@@ -148,10 +148,10 @@ func indexHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Iterate over the rows returned by the query
 	for rows.Next() {
 		var item Product
-		var imageUrlsJSON, categoriesJSON string
+		var imageUrlsJSON, categoryJSON string
 
 		// Scan values from the current row into variables
-		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoriesJSON); err != nil {
+		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoryJSON); err != nil {
 			return c.Status(500).SendString("Failed to scan row: " + err.Error())
 		}
 
@@ -160,8 +160,8 @@ func indexHandler(c *fiber.Ctx, db *sql.DB) error {
 			return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
 		}
 
-		// Parse PostgreSQL array format into []string
-		item.Categories = parsePostgresArray(categoriesJSON)
+		// Assign the single category directly (since it's not an array)
+		item.Category = categoryJSON
 
 		// Append the populated product struct to the items slice
 		items = append(items, item)
@@ -170,7 +170,6 @@ func indexHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Return the items slice as JSON response
 	return c.JSON(items)
 }
-
 func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Parse the file from the request
 	form, err := c.MultipartForm()
@@ -214,19 +213,15 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 		return c.Status(400).SendString("Invalid item price")
 	}
 
-	categoriesJSON := c.FormValue("categories")
-	var categories []string
-	if err := json.Unmarshal([]byte(categoriesJSON), &categories); err != nil {
-		return c.Status(400).SendString("Invalid categories format: " + err.Error())
-	}
+	category := c.FormValue("category")
 
 	// Insert record into the database
 	sqlStatement := `
-        INSERT INTO products (Item_name, Item_desc, Item_price, seller, image_url, categories)
+        INSERT INTO products (Item_name, Item_desc, Item_price, seller, image_url, category)
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING Item_id`
 	var itemID int
-	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, string(imageUrlsJSON), pq.Array(categories)).Scan(&itemID)
+	err = db.QueryRow(sqlStatement, itemName, itemDesc, itemPrice, itemSeller, string(imageUrlsJSON), category).Scan(&itemID)
 	if err != nil {
 		return c.Status(500).SendString("Database insert error: " + err.Error())
 	}
@@ -238,64 +233,61 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 		"Item_desc":   itemDesc,
 		"Item_price":  itemPrice,
 		"Item_seller": itemSeller,
-		"categories":  categories, 
+		"category":    category,
 		"image_url":   imageUrls,
 	}
 
 	return c.JSON(response)
 }
-
 func getProductsByCategory(c *fiber.Ctx, db *sql.DB) error {
-    category := strings.ToLower(c.Params("category")) //  category to lowercase
-    if category == "" {
-        return c.Status(400).SendString("Category is required")
-    }
+	category := strings.ToLower(c.Params("category")) //  category to lowercase
+	if category == "" {
+		return c.Status(400).SendString("Category is required")
+	}
 
-    // SQL query to fetch products by category
-    query := `
-        SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]')
+	// SQL query to fetch products by category
+	query := `
+        SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(category::text, '[]')
         FROM products
-        WHERE $1 = ANY(SELECT LOWER(unnest(categories)))
-    `
-    rows, err := db.Query(query, category)
-    if err != nil {
-        return c.Status(500).SendString("Failed to execute query: " + err.Error())
-    }
-    defer rows.Close()
+		WHERE LOWER(category) = LOWER($1)    
+		`
+	rows, err := db.Query(query, category)
+	if err != nil {
+		return c.Status(500).SendString("Failed to execute query: " + err.Error())
+	}
+	defer rows.Close()
 
-    // empty slice to store products
-    var items []Product
+	// empty slice to store products
+	var items []Product
 
-    for rows.Next() {
-        var item Product
-        var imageUrlsJSON, categoriesJSON string
+	for rows.Next() {
+		var item Product
+		var imageUrlsJSON, categoryJSON string
 
-        if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoriesJSON); err != nil {
-            return c.Status(500).SendString("Failed to scan row: " + err.Error())
-        }
+		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoryJSON); err != nil {
+			return c.Status(500).SendString("Failed to scan row: " + err.Error())
+		}
 
-        if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
-            return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
-        }
+		if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
+			return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
+		}
 
-        item.Categories = parsePostgresArray(categoriesJSON)
+		item.Category = categoryJSON
 
-        // populating product struct to the items slice
-        items = append(items, item)
-    }
-    return c.JSON(items)
+		// populating product struct to the items slice
+		items = append(items, item)
+	}
+	return c.JSON(items)
 }
-
-
 
 func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	type Item struct {
-		ItemID     int      `json:"item_id"`
-		ItemName   string   `json:"item_name"`
-		ItemDesc   string   `json:"item_desc"`
-		ItemPrice  float64  `json:"item_price"`
-		ItemSeller string   `json:"item_seller"`
-		Categories []string `json:"categories"`
+		ItemID     int     `json:"item_id"`
+		ItemName   string  `json:"item_name"`
+		ItemDesc   string  `json:"item_desc"`
+		ItemPrice  float64 `json:"item_price"`
+		ItemSeller string  `json:"item_seller"`
+		Category   string  `json:"category"`
 	}
 
 	item := new(Item)
@@ -305,9 +297,9 @@ func putHandler(c *fiber.Ctx, db *sql.DB) error {
 
 	sqlStatement := `
 		UPDATE products
-		SET Item_name = $2, Item_desc = $3, Item_price = $4, Item_seller = $5, categories = $6
+		SET Item_name = $2, Item_desc = $3, Item_price = $4, Item_seller = $5, category = $6
 		WHERE Item_id = $1`
-	res, err := db.Exec(sqlStatement, item.ItemID, item.ItemName, item.ItemDesc, item.ItemPrice, item.ItemSeller, pq.Array(item.Categories))
+	res, err := db.Exec(sqlStatement, item.ItemID, item.ItemName, item.ItemDesc, item.ItemPrice, item.ItemSeller, pq.Array(item.Category))
 	if err != nil {
 		return c.Status(500).SendString(err.Error())
 	}
@@ -327,7 +319,7 @@ func putHandler(c *fiber.Ctx, db *sql.DB) error {
 		"Item_desc":   item.ItemDesc,
 		"Item_price":  item.ItemPrice,
 		"Item_seller": item.ItemSeller,
-		"Categories":  item.Categories,
+		"Category":    item.Category,
 	})
 }
 
@@ -361,12 +353,12 @@ func getProductHandler(c *fiber.Ctx, db *sql.DB) error {
 	}
 
 	var product Product
-	var imageUrlsJSON, categoriesJSON string
+	var imageUrlsJSON string
 	sqlStatement := `
-        SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '{}')
+        SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(category::text, '')
         FROM products
         WHERE Item_id = $1`
-	err := db.QueryRow(sqlStatement, productID).Scan(&product.ItemID, &product.ItemName, &product.ItemDesc, &product.ItemPrice, &product.ItemSeller, &imageUrlsJSON, &categoriesJSON)
+	err := db.QueryRow(sqlStatement, productID).Scan(&product.ItemID, &product.ItemName, &product.ItemDesc, &product.ItemPrice, &product.ItemSeller, &imageUrlsJSON, &product.Category)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.Status(404).SendString("Product not found")
@@ -378,23 +370,5 @@ func getProductHandler(c *fiber.Ctx, db *sql.DB) error {
 		return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
 	}
 
-	// Handle categories PostgreSQL array format
-	categoriesArray := parsePostgresArray(categoriesJSON)
-
-	product.Categories = categoriesArray
-
 	return c.JSON(product)
-}
-
-// Helper function to parse PostgreSQL array format into []string
-func parsePostgresArray(input string) []string {
-	// Remove leading and trailing curly braces
-	input = strings.Trim(input, "{}")
-	// Split by commas
-	categories := strings.Split(input, ",")
-	// Trim whitespace from each element
-	for i := range categories {
-		categories[i] = strings.TrimSpace(categories[i])
-	}
-	return categories
 }
