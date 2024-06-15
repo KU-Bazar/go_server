@@ -132,42 +132,41 @@ func uploadToS3(filename string, fileContent io.Reader) (string, error) {
 }
 
 func indexHandler(c *fiber.Ctx, db *sql.DB) error {
-    // Execute SQL query to fetch all products
-    rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]') FROM products")
-    if err != nil {
-        return c.Status(500).SendString("Failed to execute query: " + err.Error())
-    }
-    defer rows.Close()
+	// Execute SQL query to fetch all products
+	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]') FROM products")
+	if err != nil {
+		return c.Status(500).SendString("Failed to execute query: " + err.Error())
+	}
+	defer rows.Close()
 
-    // Initialize an empty slice to store products
-    var items []Product
+	// Initialize an empty slice to store products
+	var items []Product
 
-    // Iterate over the rows returned by the query
-    for rows.Next() {
-        var item Product
-        var imageUrlsJSON, categoriesJSON string
+	// Iterate over the rows returned by the query
+	for rows.Next() {
+		var item Product
+		var imageUrlsJSON, categoriesJSON string
 
-        // Scan values from the current row into variables
-        if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoriesJSON); err != nil {
-            return c.Status(500).SendString("Failed to scan row: " + err.Error())
-        }
+		// Scan values from the current row into variables
+		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoriesJSON); err != nil {
+			return c.Status(500).SendString("Failed to scan row: " + err.Error())
+		}
 
-        // Unmarshal JSON strings into slices
-        if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
-            return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
-        }
+		// Unmarshal JSON strings into slices
+		if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
+			return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
+		}
 
-        // Parse PostgreSQL array format into []string
-        item.Categories = parsePostgresArray(categoriesJSON)
+		// Parse PostgreSQL array format into []string
+		item.Categories = parsePostgresArray(categoriesJSON)
 
-        // Append the populated product struct to the items slice
-        items = append(items, item)
-    }
+		// Append the populated product struct to the items slice
+		items = append(items, item)
+	}
 
-    // Return the items slice as JSON response
-    return c.JSON(items)
+	// Return the items slice as JSON response
+	return c.JSON(items)
 }
-
 
 func postHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Parse the file from the request
