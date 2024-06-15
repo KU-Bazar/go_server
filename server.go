@@ -82,6 +82,9 @@ func main() {
 		return getProductHandler(c, db)
 	})
 
+	app.Get("category/:category", func(c *fiber.Ctx) error {
+		return getProductsByCategory(c, db)
+	})
 	// Port connection
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -235,12 +238,55 @@ func postHandler(c *fiber.Ctx, db *sql.DB) error {
 		"Item_desc":   itemDesc,
 		"Item_price":  itemPrice,
 		"Item_seller": itemSeller,
-		"categories":  categories, // Ensure categories is returned in the response
+		"categories":  categories, 
 		"image_url":   imageUrls,
 	}
 
 	return c.JSON(response)
 }
+
+func getProductsByCategory(c *fiber.Ctx, db *sql.DB) error {
+    category := strings.ToLower(c.Params("category")) //  category to lowercase
+    if category == "" {
+        return c.Status(400).SendString("Category is required")
+    }
+
+    // SQL query to fetch products by category
+    query := `
+        SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(categories::text, '[]')
+        FROM products
+        WHERE $1 = ANY(SELECT LOWER(unnest(categories)))
+    `
+    rows, err := db.Query(query, category)
+    if err != nil {
+        return c.Status(500).SendString("Failed to execute query: " + err.Error())
+    }
+    defer rows.Close()
+
+    // empty slice to store products
+    var items []Product
+
+    for rows.Next() {
+        var item Product
+        var imageUrlsJSON, categoriesJSON string
+
+        if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoriesJSON); err != nil {
+            return c.Status(500).SendString("Failed to scan row: " + err.Error())
+        }
+
+        if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
+            return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
+        }
+
+        item.Categories = parsePostgresArray(categoriesJSON)
+
+        // populating product struct to the items slice
+        items = append(items, item)
+    }
+    return c.JSON(items)
+}
+
+
 
 func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	type Item struct {
