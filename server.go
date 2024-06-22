@@ -85,6 +85,9 @@ func main() {
 	app.Get("category/:category", func(c *fiber.Ctx) error {
 		return getProductsByCategory(c, db)
 	})
+	app.Get("/search/product/:productName", func(c *fiber.Ctx) error {
+		return searchProductByName(c, db)
+	})
 	// Port connection
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -136,7 +139,7 @@ func uploadToS3(filename string, fileContent io.Reader) (string, error) {
 
 func indexHandler(c *fiber.Ctx, db *sql.DB) error {
 	// Execute SQL query to fetch all products
-	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(category::text, '{}') FROM products")
+	rows, err := db.Query("SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(category::text, '{}') FROM products ORDER BY Item_id DESC")
 	if err != nil {
 		return c.Status(500).SendString("Failed to execute query: " + err.Error())
 	}
@@ -280,6 +283,47 @@ func getProductsByCategory(c *fiber.Ctx, db *sql.DB) error {
 	return c.JSON(items)
 }
 
+func searchProductByName(c *fiber.Ctx, db *sql.DB) error {
+	productName := c.Params("productName")
+	if productName == "" {
+		return c.Status(400).SendString("Product name is required")
+	}
+
+	// SQL query to fetch products by partial match on Item_name
+	query := `
+        SELECT Item_id, Item_name, Item_desc, Item_price, seller, COALESCE(image_url::text, '[]'), COALESCE(category::text, '[]')
+        FROM products
+        WHERE LOWER(Item_name) LIKE LOWER($1)`
+	rows, err := db.Query(query, fmt.Sprintf("%%%s%%", productName))
+	if err != nil {
+		return c.Status(500).SendString("Failed to execute query: " + err.Error())
+	}
+	defer rows.Close()
+
+	// Initialize a slice to store products
+	var items []Product
+
+	for rows.Next() {
+		var item Product
+		var imageUrlsJSON, categoryJSON string
+
+		if err := rows.Scan(&item.ItemID, &item.ItemName, &item.ItemDesc, &item.ItemPrice, &item.ItemSeller, &imageUrlsJSON, &categoryJSON); err != nil {
+			return c.Status(500).SendString("Failed to scan row: " + err.Error())
+		}
+
+		if err := json.Unmarshal([]byte(imageUrlsJSON), &item.ImageURL); err != nil {
+			return c.Status(500).SendString("Failed to unmarshal image URLs: " + err.Error())
+		}
+
+		item.Category = categoryJSON
+
+		// Append the product to the items slice
+		items = append(items, item)
+	}
+
+	// Return the items slice as JSON response
+	return c.JSON(items)
+}
 func putHandler(c *fiber.Ctx, db *sql.DB) error {
 	type Item struct {
 		ItemID     int     `json:"item_id"`
